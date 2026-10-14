@@ -14,6 +14,7 @@ import time
 import json
 import hmac
 import shlex
+import tempfile
 import asyncio
 import subprocess
 import logging
@@ -136,8 +137,25 @@ class PipelineWorker:
                     "retry_count": job_info.retry_count
                 }
 
-            with open(self.running_jobs_file, 'w', encoding='utf-8') as f:
-                json.dump(jobs_data, f, ensure_ascii=False, indent=2)
+            state_path = os.path.abspath(self.running_jobs_file)
+            state_dir = os.path.dirname(state_path)
+            fd, temporary_path = tempfile.mkstemp(
+                prefix='.running_jobs-', dir=state_dir
+            )
+            try:
+                with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                    json.dump(jobs_data, f, ensure_ascii=False, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temporary_path, state_path)
+                directory_fd = os.open(state_dir, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            finally:
+                if os.path.exists(temporary_path):
+                    os.remove(temporary_path)
 
             logger.debug(
                 f"已保存 {len(jobs_data)} 个运行中的任务到 {self.running_jobs_file}")
@@ -194,8 +212,8 @@ class PipelineWorker:
                 if current_status in ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"]:
                     logger.info(
                         f"恢复的任务已完成: {job_info.job_id} -> {current_status}")
-                    await self._handle_job_completion(job_info, current_status)
-                    jobs_to_remove.append(job_key)
+                    if await self._handle_job_completion(job_info, current_status):
+                        jobs_to_remove.append(job_key)
                 else:
                     logger.info(
                         f"恢复的任务仍在运行: {job_info.job_id} -> {current_status}")
@@ -269,12 +287,14 @@ class PipelineWorker:
                 error_msg = f"作业提交失败: {pipeline_id}/{step_name}"
                 logger.error(error_msg)
                 # 通知步骤失败
-                await self._notify_step_failed(pipeline_id, step_name, error_msg)
+                if not source_relative_path:
+                    await self._notify_step_failed(pipeline_id, step_name, error_msg)
                 return {"status": "failed", "error": "作业提交失败"}
                 
         except Exception as e:
             logger.error(f"开始步骤时发生错误: {e}")
-            await self._notify_step_failed(pipeline_id, step_name, str(e))
+            if not source_relative_path:
+                await self._notify_step_failed(pipeline_id, step_name, str(e))
             return {"status": "error", "error": str(e)}
     
     def _resolve_h5_path(
@@ -569,13 +589,12 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
                     not os.path.isfile(expected_output)
                     or os.path.getsize(expected_output) == 0
                 ):
-                    await self._notify_step_failed(
+                    return await self._notify_step_failed(
                         job_info.pipeline_id,
                         job_info.step_name,
                         f"SLURM job {job_info.job_id} completed without output: "
                         f"{expected_output}",
                     )
-                    return True
 
                 # 调用完成API
                 url = f"{self.core_server_url}/api/pipeline/{job_info.pipeline_id}/step/{job_info.step_name}/complete"
@@ -641,13 +660,11 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
                     logger.debug(f"获取作业错误详情失败: {e}")
                 
                 # 调用失败API
-                await self._notify_step_failed(
+                return await self._notify_step_failed(
                     job_info.pipeline_id, 
                     job_info.step_name, 
                     error_message
                 )
-                
-                return True
 
         except Exception as e:
             logger.error(f"处理作业完成时发生错误: {e}")
@@ -690,7 +707,7 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
             if not self.is_running or self.http_client.is_closed:
                 logger.debug(f"跳过步骤失败通知，worker 已关闭或 http_client 不可用: {pipeline_id}/{step_name}")
                 logger.error(f"原始失败信息: {error_message}")
-                return
+                return False
                 
             url = f"{self.core_server_url}/api/pipeline/{pipeline_id}/step/{step_name}/fail"
             error_data = {
@@ -704,8 +721,10 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
             if response.status_code == 200:
                 logger.info(f"步骤失败通知发送成功: {pipeline_id}/{step_name}")
                 logger.info(f"失败信息: {error_message}")
+                return True
             else:
                 logger.warning(f"步骤失败通知发送失败: {response.status_code} - {response.text}")
+                return False
                 
         except Exception as e:
             logger.error(f"通知步骤失败时发生错误: {e}")
@@ -714,7 +733,7 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
             # 如果是因为事件循环关闭导致的错误，不再尝试重新连接
             if "Event loop is closed" in str(e):
                 logger.debug("检测到事件循环已关闭，停止步骤失败通知")
-                return
+            return False
     
     async def _get_job_error_details(self, job_id: str) -> Optional[str]:
         """获取作业的详细错误信息"""

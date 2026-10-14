@@ -90,7 +90,7 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
 
         self.worker.http_client.post.reset_mock()
         output.unlink()
-        self.worker._notify_step_failed = AsyncMock()
+        self.worker._notify_step_failed = AsyncMock(return_value=True)
         self.assertTrue(await self.worker._handle_job_completion(self.job(), "COMPLETED"))
         self.worker._notify_step_failed.assert_awaited_once()
         self.worker.http_client.post.assert_not_awaited()
@@ -101,6 +101,36 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
             return_value=SimpleNamespace(status_code=503)
         )
         self.assertFalse(await self.worker._handle_job_completion(self.job(), "COMPLETED"))
+
+    async def test_failed_callback_failure_retains_job_for_retry(self):
+        job = self.job()
+        job.retry_count = 2
+        self.worker._notify_step_failed = AsyncMock(return_value=False)
+        self.worker._get_job_error_details = AsyncMock(return_value=None)
+        self.assertFalse(await self.worker._handle_job_completion(job, "FAILED"))
+
+    async def test_recovery_keeps_job_until_callback_acknowledged(self):
+        job = self.job()
+        key = "pipeline-1_h5_to_v3draw"
+        self.worker.running_jobs[key] = job
+        self.worker._check_job_status = AsyncMock(return_value="COMPLETED")
+        self.worker._handle_job_completion = AsyncMock(return_value=False)
+        with patch.object(module.asyncio, "sleep", new=AsyncMock()):
+            await self.worker._verify_recovered_jobs()
+        self.assertIn(key, self.worker.running_jobs)
+        self.assertEqual(self.worker.running_jobs[key].job_id, "42")
+
+    async def test_running_jobs_state_is_published_atomically(self):
+        self.worker.running_jobs["pipeline-1_h5_to_v3draw"] = self.job()
+        self.worker._save_running_jobs()
+        self.assertTrue(Path("running_jobs.json").is_file())
+        self.assertEqual(
+            __import__("json").loads(Path("running_jobs.json").read_text())[
+                "pipeline-1_h5_to_v3draw"
+            ]["source_relative_path"],
+            "folder/nested/sample.pyramid.h5",
+        )
+        self.assertEqual(list(Path(".").glob(".running_jobs-*")), [])
 
     async def test_slurm_query_timeout_does_not_mark_job_failed(self):
         with patch.object(

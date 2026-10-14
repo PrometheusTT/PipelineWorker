@@ -3,18 +3,17 @@
 Pipeline Worker - 图像处理流程工作器
 负责接收任务、提交sbatch作业、监控状态并与hndb api交互
 
-新增功能:
-- UploadFileWatcher: 监控cfg.ImageTransferTemp路径下的.h5文件上传
-  * 实时监控指定目录下的.h5文件变化
-  * 检测文件创建和移动事件
-  * 等待文件上传完成（通过文件大小稳定性检查）
-  * 自动通知core server有新文件上传
+Only verified files already committed to the production pool are accepted.
+Upload-directory polling is intentionally disabled: transfer completion is a
+durable database event, not a short file-size stability heuristic.
 """
 
 import os
 import sys
 import time
 import json
+import hmac
+import shlex
 import asyncio
 import subprocess
 import logging
@@ -23,11 +22,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 from dataclasses import dataclass
 from enum import Enum as PyEnum
-from fastapi import FastAPI, HTTPException, Body
+from pathlib import Path, PurePosixPath
+from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
 import config as cfg
-import archive
 
 # 配置日志
 logging.basicConfig(
@@ -45,7 +44,8 @@ class StartStepRequest(BaseModel):
     pipeline_id: str
     step_name: str
     h5_image_name: str
-    force_restart: bool
+    source_relative_path: Optional[str] = None
+    force_restart: bool = False
 
 class StepStatusEnum(str, PyEnum):
     """步骤状态枚举"""
@@ -81,6 +81,7 @@ class JobInfo:
     submit_time: datetime
     last_check_time: datetime
     h5_image_name: Optional[str] = None
+    source_relative_path: Optional[str] = None
     status: str = "PENDING"
     retry_count: int = 0
 
@@ -104,7 +105,8 @@ class PipelineWorker:
         self.running_jobs_file = "running_jobs.json"
 
         # HTTP 客户端
-        self.http_client = httpx.AsyncClient(timeout=30.0)
+        headers = {"X-HNDB-Worker-Token": cfg.WorkerToken} if cfg.WorkerToken else {}
+        self.http_client = httpx.AsyncClient(timeout=30.0, headers=headers)
         
         # 工作状态
         self.is_running = True
@@ -129,6 +131,7 @@ class PipelineWorker:
                     "submit_time": job_info.submit_time.isoformat(),
                     "last_check_time": job_info.last_check_time.isoformat(),
                     "h5_image_name": job_info.h5_image_name,
+                    "source_relative_path": job_info.source_relative_path,
                     "status": job_info.status,
                     "retry_count": job_info.retry_count
                 }
@@ -162,6 +165,7 @@ class PipelineWorker:
                     last_check_time=datetime.fromisoformat(
                         job_data["last_check_time"]),
                     h5_image_name=job_data.get("h5_image_name"),
+                    source_relative_path=job_data.get("source_relative_path"),
                     status=job_data["status"],
                     retry_count=job_data.get("retry_count", 0)
                 )
@@ -217,19 +221,28 @@ class PipelineWorker:
         except Exception as e:
             logger.error(f"清理运行任务文件失败: {e}")
 
-    async def start_step(self, pipeline_id: str, step_name: str, h5_image_name: Optional[str] = None, force_restart: bool = False) -> dict:
+    async def start_step(
+        self,
+        pipeline_id: str,
+        step_name: str,
+        h5_image_name: Optional[str] = None,
+        source_relative_path: Optional[str] = None,
+        force_restart: bool = False,
+    ) -> dict:
         """开始执行处理步骤"""
         try:
             logger.info(f"开始执行步骤: {pipeline_id}/{step_name}")
             
             # 检查是否已有该步骤在运行
             job_key = f"{pipeline_id}_{step_name}"
-            if job_key in self.running_jobs and not force_restart:
+            if job_key in self.running_jobs:
                 logger.warning(f"步骤 {pipeline_id}/{step_name} 已在运行中")
                 return {"status": "already_running", "job_id": self.running_jobs[job_key].job_id}
             
             # 提交 sbatch 作业
-            job_id = await self._submit_sbatch_job(pipeline_id, step_name, h5_image_name)
+            job_id = await self._submit_sbatch_job(
+                pipeline_id, step_name, h5_image_name, source_relative_path
+            )
             
             if job_id:
                 # 记录作业信息
@@ -239,7 +252,8 @@ class PipelineWorker:
                     step_name=step_name,
                     submit_time=datetime.now(),
                     last_check_time=datetime.now(),
-                    h5_image_name=h5_image_name
+                    h5_image_name=h5_image_name,
+                    source_relative_path=source_relative_path,
                 )
                 self.running_jobs[job_key] = job_info
                 
@@ -263,7 +277,50 @@ class PipelineWorker:
             await self._notify_step_failed(pipeline_id, step_name, str(e))
             return {"status": "error", "error": str(e)}
     
-    async def _submit_sbatch_job(self, pipeline_id: str, step_name: str, h5_image_name: Optional[str]) -> Optional[str]:
+    def _resolve_h5_path(
+        self, source_relative_path: Optional[str], h5_image_name: Optional[str]
+    ) -> str:
+        if source_relative_path:
+            relative = PurePosixPath(source_relative_path.replace("\\", "/"))
+            if relative.is_absolute() or any(
+                part in {"", ".", ".."} for part in relative.parts
+            ):
+                raise ValueError("Invalid production-relative processing path")
+            root = os.path.realpath(cfg.ProcessingStorageRoot)
+            candidate = os.path.realpath(os.path.join(root, *relative.parts))
+            if os.path.commonpath([root, candidate]) != root:
+                raise ValueError("Processing input escapes production storage root")
+        elif cfg.LegacyInputRoot and h5_image_name:
+            candidate = os.path.realpath(
+                os.path.join(cfg.LegacyInputRoot, os.path.basename(h5_image_name))
+            )
+        else:
+            raise ValueError("source_relative_path is required for archived data")
+        if not candidate.endswith(".pyramid.h5") or not os.path.isfile(candidate):
+            raise FileNotFoundError(f"Verified H5 processing input is missing: {candidate}")
+        return candidate
+
+    def _expected_output_path(self, job_info: JobInfo) -> Optional[str]:
+        h5_path = self._resolve_h5_path(
+            job_info.source_relative_path, job_info.h5_image_name
+        )
+        prefix = h5_path[: -len(".pyramid.h5")]
+        suffixes = {
+            "h5_to_v3draw": ".v3draw",
+            "bit_conversion": "_8bit.v3draw",
+            "downsample": "_8bit_downsampled.v3draw",
+            "mip_generation": "_MIP.tif",
+        }
+        suffix = suffixes.get(job_info.step_name)
+        return prefix + suffix if suffix else None
+
+    async def _submit_sbatch_job(
+        self,
+        pipeline_id: str,
+        step_name: str,
+        h5_image_name: Optional[str],
+        source_relative_path: Optional[str],
+    ) -> Optional[str]:
         """提交 sbatch 作业"""
         try:
             # 根据步骤名称选择对应的处理脚本
@@ -284,28 +341,39 @@ class PipelineWorker:
             if not os.path.exists(script_path):
                 raise FileNotFoundError(f"处理脚本不存在: {script_path}")
             
-            image_name = h5_image_name if h5_image_name is not None else ""
-            if step_name == "h5_to_v3draw" or step_name == "mip_generation":
-                image_name = h5_image_name if h5_image_name is not None else ""
-            elif step_name == "bit_conversion" and image_name:
-                image_name = image_name.replace('.pyramid.h5', '.v3draw')
-            elif step_name == "downsample" and image_name:
-                image_name = image_name.replace('.pyramid.h5', '_8bit.v3draw')
+            h5_path = self._resolve_h5_path(source_relative_path, h5_image_name)
+            if step_name in {"h5_to_v3draw", "mip_generation", "cell_crop_generation"}:
+                image_path = h5_path
+            elif step_name == "bit_conversion":
+                image_path = h5_path[:-len(".pyramid.h5")] + ".v3draw"
+            elif step_name == "downsample":
+                image_path = h5_path[:-len(".pyramid.h5")] + "_8bit.v3draw"
+            else:
+                raise ValueError(f"未知的步骤名称: {step_name}")
+            if not os.path.isfile(image_path):
+                raise FileNotFoundError(f"Processing input is missing: {image_path}")
 
             temp_script_root_path = cfg.SlurmScriptPath
             os.makedirs(temp_script_root_path, exist_ok=True)
 
             # 构建 sbatch 命令
             sbatch_script = self._generate_sbatch_script(
-                pipeline_id, step_name, script_path, image_name, temp_script_root_path)
+                pipeline_id, step_name, script_path, image_path, temp_script_root_path)
 
             # 写入临时脚本文件
-            temp_script_path = f"{temp_script_root_path}/sbatch_{pipeline_id}_{step_name}_{int(time.time())}.sh"
+            safe_pipeline_id = "".join(
+                char if char.isalnum() or char in "._-" else "_"
+                for char in pipeline_id
+            )[:180]
+            temp_script_path = os.path.join(
+                temp_script_root_path,
+                f"sbatch_{safe_pipeline_id}_{step_name}_{int(time.time())}.sh",
+            )
             with open(temp_script_path, 'w') as f:
                 f.write(sbatch_script)
 
             # chmod +x 使脚本可执行
-            os.chmod(temp_script_path, 0o775)
+            os.chmod(temp_script_path, 0o750)
             logger.info(f"提交 sbatch 作业: {temp_script_path}")
 
             # 提交作业
@@ -329,32 +397,35 @@ class PipelineWorker:
             logger.error(f"提交 sbatch 作业时发生错误: {e}")
             return None
 
-    def _generate_sbatch_script(self, pipeline_id: str, step_name: str, script_path: str, image_name: str, temp_script_root_path: str) -> str:
+    def _generate_sbatch_script(self, pipeline_id: str, step_name: str, script_path: str, image_path: str, temp_script_root_path: str) -> str:
         """生成 sbatch 脚本内容"""
-        image_path = os.path.join(cfg.ImageTransferTemp, image_name if image_name else "") 
-
+        qos_line = f"#SBATCH --qos={cfg.SlurmQos}\n" if cfg.SlurmQos else ""
+        job_name = "".join(
+            char if char.isalnum() or char in "_-" else "_"
+            for char in f"{step_name}_{pipeline_id}"
+        )[:200]
         return f"""#!/bin/bash
-#SBATCH --job-name={step_name}_{pipeline_id}
+#SBATCH --job-name={job_name}
 #SBATCH --output={temp_script_root_path}/slurm_%j.out
 #SBATCH --error={temp_script_root_path}/slurm_%j.err
-#SBATCH --qos=pbstorageaccess
-#SBATCH --partition=normal
-#SBATCH --mem=250G
+{qos_line}#SBATCH --partition={cfg.SlurmPartition}
+#SBATCH --mem={cfg.SlurmMemory}
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --ntasks-per-node=1
 
+set -euo pipefail
+umask 027
+
 # 设置环境变量
-export PIPELINE_ID={pipeline_id}
-export STEP_NAME={step_name}
-export WORKER_ID={self.worker_id}
-export CORE_SERVER_URL={self.core_server_url}
+export PIPELINE_ID={shlex.quote(pipeline_id)}
+export STEP_NAME={shlex.quote(step_name)}
+export WORKER_ID={shlex.quote(self.worker_id)}
+export CORE_SERVER_URL={shlex.quote(self.core_server_url)}
 
 # 执行处理脚本
-source $(conda info --base)/etc/profile.d/conda.sh
-conda activate HumanDatabaseTools
-~/miniconda3/envs/HumanDatabaseTools/bin/python3 {script_path} --image-path "{image_path}"
+exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path {shlex.quote(image_path)}
 """
     
     async def _check_job_status(self, job_info: JobInfo) -> str:
@@ -379,10 +450,10 @@ conda activate HumanDatabaseTools
                     
         except subprocess.TimeoutExpired:
             logger.warning(f"检查作业状态超时: {job_info.job_id}")
-            return "TIMEOUT"
+            return "UNKNOWN"
         except Exception as e:
             logger.error(f"检查作业状态时发生错误: {e}")
-            return "ERROR"
+            return "UNKNOWN"
     
     async def _monitor_jobs(self):
         """监控所有运行中的作业"""
@@ -395,22 +466,28 @@ conda activate HumanDatabaseTools
                     
                 jobs_to_remove = []
                 
+                final_states = {
+                    "COMPLETED", "FAILED", "CANCELLED", "TIMEOUT",
+                    "NODE_FAIL", "OUT_OF_MEMORY",
+                }
                 for job_key, job_info in self.running_jobs.items():
                     # 检查作业状态
                     current_status = await self._check_job_status(job_info)
+                    if current_status == "UNKNOWN":
+                        continue
                     
                     if current_status != job_info.status:
                         logger.info(f"作业状态变化: {job_info.job_id} {job_info.status} -> {current_status}")
                         job_info.status = current_status
                         
                         # 更新进度
-                        await self._update_job_progress(job_info, current_status)
+                        if current_status not in final_states:
+                            await self._update_job_progress(job_info, current_status)
 
                         # 保存状态变化到文件
                         self._save_running_jobs()
 
                     # 处理已完成或失败的作业
-                    final_states = ["COMPLETED", "FAILED", "CANCELLED", "TIMEOUT", "NODE_FAIL", "OUT_OF_MEMORY"]
                     if current_status in final_states:
                         should_remove = await self._handle_job_completion(job_info, current_status)
                         if should_remove:
@@ -484,55 +561,21 @@ conda activate HumanDatabaseTools
             # 检查 worker 是否仍在运行且 http_client 可用
             if not self.is_running or self.http_client.is_closed:
                 logger.debug(f"跳过作业完成处理，worker 已关闭或 http_client 不可用: {job_info.job_id}")
-                return True
+                return False
                 
             if final_status == "COMPLETED":
-                # 根据步骤名称组成对应的文件名
-                h5_image_name = job_info.h5_image_name if job_info.h5_image_name is not None else ""
-                script_mapping = {
-                    "mip_generation": f"{h5_image_name.replace('.pyramid.h5', '_MIP.tif')}",
-                    "h5_to_v3draw": f"{h5_image_name.replace('.pyramid.h5', '.v3draw')}",
-                    "bit_conversion": f"{h5_image_name.replace('.pyramid.h5', '_8bit.v3draw')}",
-                    "downsample": f"{h5_image_name.replace('.pyramid.h5', '_8bit_downsampled.v3draw')}",
-                }
-
-                file_to_check = script_mapping.get(job_info.step_name, "")
-                if file_to_check != "":
-                    if not os.path.exists(os.path.join(cfg.ImageTransferTemp, file_to_check)):
-                        # 构建详细的错误信息
-                        error_message = f"SLURM作业失败 - 作业ID: {job_info.job_id}, 最终状态: {final_status}, 任务结束但未找到处理后的结果文件！"
-                        
-                        # 尝试获取更详细的错误信息
-                        try:
-                            error_details = await self._get_job_error_details(job_info.job_id)
-                            if error_details:
-                                error_message += f", 错误详情: {error_details}"
-                        except Exception as e:
-                            logger.debug(f"获取作业错误详情失败: {e}")
-                        
-                        # 调用失败API
-                        await self._notify_step_failed(
-                            job_info.pipeline_id, 
-                            job_info.step_name,
-                            error_message
-                        )
-                        return True
-                    elif job_info.step_name == "mip_generation":
-                        # Archive files sequentially - ensure organize_image_files completes before ArchiveCommand
-                        # Using await asyncio.to_thread to run blocking functions without blocking the event loop
-                        # 提取图像ID用于单文件处理
-                        h5_image_name = job_info.h5_image_name if job_info.h5_image_name else ""
-
-                        # 从h5文件名中提取图像ID
-                        import re
-                        pattern = r'(P\d+-T\d+-R\d+-S\d+(?:-B\d+)?(?:-\d+)?)'
-                        match = re.search(pattern, h5_image_name)
-                        image_id = match.group(1) if match else None
-
-                        # 只处理当前文件相关的文件
-                        await asyncio.to_thread(archive.organize_image_files, h5_image_name)
-                        # Only execute ArchiveCommand after organize_image_files is complete
-                        await asyncio.to_thread(archive.ArchiveCommand, image_id)
+                expected_output = self._expected_output_path(job_info)
+                if expected_output and (
+                    not os.path.isfile(expected_output)
+                    or os.path.getsize(expected_output) == 0
+                ):
+                    await self._notify_step_failed(
+                        job_info.pipeline_id,
+                        job_info.step_name,
+                        f"SLURM job {job_info.job_id} completed without output: "
+                        f"{expected_output}",
+                    )
+                    return True
 
                 # 调用完成API
                 url = f"{self.core_server_url}/api/pipeline/{job_info.pipeline_id}/step/{job_info.step_name}/complete"
@@ -546,6 +589,7 @@ conda activate HumanDatabaseTools
                     logger.info(f"步骤完成通知发送成功: {job_info.pipeline_id}/{job_info.step_name}")
                 else:
                     logger.warning(f"步骤完成通知发送失败: {response.status_code}")
+                    return False
 
                 return True
             else:
@@ -558,7 +602,8 @@ conda activate HumanDatabaseTools
                     new_job_id = await self._submit_sbatch_job(
                         job_info.pipeline_id,
                         job_info.step_name,
-                        job_info.h5_image_name
+                        job_info.h5_image_name,
+                        job_info.source_relative_path,
                     )
 
                     if new_job_id:
@@ -606,7 +651,7 @@ conda activate HumanDatabaseTools
 
         except Exception as e:
             logger.error(f"处理作业完成时发生错误: {e}")
-            return True
+            return False
     
     async def _notify_step_started(self, pipeline_id: str, step_name: str, job_id: str):
         """通知步骤已开始"""
@@ -827,8 +872,9 @@ async def startup_event():
     else:
         worker.background_tasks = [monitor_task, heartbeat_task]
     
-    # 启动文件监控器
-    file_observer = UploadFileWatcher()
+    # Archived collections are queued by the backend's durable transfer
+    # transaction. Never infer a complete upload from file-size stability.
+    file_observer = None
     
     logger.info("Pipeline Worker 启动完成")
 
@@ -1091,15 +1137,27 @@ async def shutdown_event():
 
 @app.post("/api/worker/start")
 async def start_step_endpoint(
-    request: StartStepRequest
+    request: StartStepRequest,
+    x_hndb_worker_token: Optional[str] = Header(default=None),
 ):
-    print(f"接收到开始步骤请求: {request.pipeline_id}/{request.step_name} - {request.h5_image_name}")
     """接收步骤开始请求"""
+    if not cfg.WorkerToken:
+        raise HTTPException(status_code=503, detail="Worker token is not configured")
+    if not x_hndb_worker_token or not hmac.compare_digest(
+        cfg.WorkerToken, x_hndb_worker_token
+    ):
+        raise HTTPException(status_code=403, detail="Invalid worker token")
     if not worker:
         raise HTTPException(status_code=500, detail="Worker 未初始化")
     
     # 同步处理步骤开始，以便返回准确的状态
-    result = await worker.start_step(request.pipeline_id, request.step_name, request.h5_image_name, request.force_restart)
+    result = await worker.start_step(
+        request.pipeline_id,
+        request.step_name,
+        h5_image_name=request.h5_image_name,
+        source_relative_path=request.source_relative_path,
+        force_restart=request.force_restart,
+    )
     
     # 根据返回结果构造响应
     if result["status"] == "already_running":
@@ -1142,14 +1200,14 @@ async def get_file_watcher_status():
     
     if not file_observer:
         return {
-            "status": "not_running",
-            "watch_path": cfg.ImageTransferTemp,
-            "message": "文件监控器未启动"
+            "status": "disabled",
+            "watch_path": None,
+            "message": "Uploads are queued after verified storage archive completion",
         }
     
     return {
         "status": "running" if file_observer.is_running else "stopped",
-        "watch_path": cfg.ImageTransferTemp,
+        "watch_path": getattr(file_observer, "watch_path", None),
         "is_running": file_observer.is_running,
         "timestamp": datetime.now().isoformat()
     }
@@ -1167,7 +1225,7 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="Pipeline Worker")
-    parser.add_argument("--host", default="0.0.0.0", help="Host to bind to")
+    parser.add_argument("--host", default="127.0.0.1", help="Host to bind to")
     parser.add_argument("--port", type=int, default=7000, help="Port to bind to")
     
     args = parser.parse_args()

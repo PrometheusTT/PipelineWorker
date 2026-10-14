@@ -32,17 +32,16 @@ class DataAccess:
         somalist = pd.read_csv(apo_file)
         return somalist
 
-    def get_image_data(self, ptrsid, docid, raw_loader):
+    def get_image_data(self, image_path, raw_loader):
         """
         获取单个 document 的三维数据
         :return: np.array 形状 (c, z, y, x)
         """
-        imgpath = os.path.join(self.img_dir, docid, docid + '_8bit.v3draw')
-        if not os.path.exists(imgpath):
-            print(f"Can not find image file: {imgpath}")
+        if not os.path.isfile(image_path):
+            print(f"Can not find image file: {image_path}")
             return None
         
-        img = raw_loader.load(imgpath)
+        img = raw_loader.load(image_path)
         return img
 
 
@@ -80,7 +79,7 @@ def fp2dbdirs(strcid):
     return todir2
 
 
-def main(h5_image_name):
+def main(h5_path):
     # h5_image_name (Input Parm 1)
     # Soma Marker Files: Located in /PBS/BRAINTELL/Projects/HumanNeurons/AllBrainSlices/HNDB_files/SamplePreparation/{ptrsid}/{docid}/{docid}_initial.apo
     # Raw Image Files: Located in /PBS/BRAINTELL/Projects/HumanNeurons/AllBrainSlices/PTRSB_DB/{ptrsid}/{docid}_8bit.v3draw
@@ -111,12 +110,15 @@ def main(h5_image_name):
  
     xy_size = 700  # 裁剪图像边长的一半
 
+    h5_image_name = os.path.basename(h5_path)
     if h5_image_name.endswith(".pyramid.h5"):
-        docid = h5_image_name.replace(".pyramid.h5", "")
+        docid = h5_image_name[:-len(".pyramid.h5")]
+        image_path = h5_path[:-len(".pyramid.h5")] + "_8bit.v3draw"
     elif h5_image_name.endswith(".h5"):
-        docid = h5_image_name.replace(".h5", "")
+        docid = h5_image_name[:-len(".h5")]
+        image_path = h5_path[:-len(".h5")] + "_8bit.v3draw"
     else:
-        docid = h5_image_name
+        raise ValueError("Expected an H5 input path")
 
     # 处理 docid，得到 ptrsid
     ptrsid = docid
@@ -152,7 +154,7 @@ def main(h5_image_name):
     print('Now:', docid, 'Somas=', somalist.shape[0])
     
     # 加载原始图像数据 (c, z, y, x)
-    img = data_accessor.get_image_data(ptrsid, docid, raw_loader)
+    img = data_accessor.get_image_data(image_path, raw_loader)
     if img is None:
         print("Image data not found for:", docid)
         raise Exception("Image data not found for: " + docid)
@@ -173,6 +175,7 @@ def main(h5_image_name):
         
         if x_start >= x_end or y_start >= y_end:
             print("Invalid crop region for cell_id:", this_sid, "at x,y =", sx, sy)
+            this_sid += 1
             continue
         
         # 新的 soma 相对于裁剪子图的坐标
@@ -234,6 +237,4 @@ if __name__ == '__main__':
     input_path = args.image_path
     input_path = input_path.strip()
 
-    h5_image_name = os.path.basename(input_path)
-
-    main(h5_image_name)
+    main(input_path)

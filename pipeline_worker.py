@@ -460,7 +460,9 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
                 return status
             else:
                 # 作业不在队列中，检查是否已完成
-                cmd = ["sacct", "-j", job_info.job_id, "-n", "-o", "State"]
+                # The default State column truncates "CANCELLED by <uid>" to
+                # "CANCELLED+", which is not a terminal state in our monitor.
+                cmd = ["sacct", "-j", job_info.job_id, "-n", "-o", "State%32"]
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
                 
                 if result.returncode == 0 and result.stdout.strip():
@@ -617,7 +619,8 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
                 return True
             else:
                 # 检查是否可以重试
-                if job_info.retry_count < 2:
+                # An operator cancellation is intentional; never resubmit it.
+                if final_status != "CANCELLED" and job_info.retry_count < 2:
                     logger.info(
                         f"作业失败: {job_info.job_id} (状态: {final_status}), 尝试重试 ({job_info.retry_count + 1}/2)")
 

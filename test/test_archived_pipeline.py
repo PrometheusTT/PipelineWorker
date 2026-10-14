@@ -170,6 +170,25 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertEqual(await self.worker._check_job_status(self.job()), "UNKNOWN")
 
+    async def test_cancelled_sacct_state_is_not_truncated(self):
+        def run(command, **_kwargs):
+            if command[0] == "squeue":
+                return SimpleNamespace(returncode=0, stdout="")
+            self.assertIn("State%32", command)
+            return SimpleNamespace(returncode=0, stdout="CANCELLED by 1000\n")
+
+        with patch.object(module.subprocess, "run", side_effect=run):
+            self.assertEqual(await self.worker._check_job_status(self.job()), "CANCELLED")
+
+    async def test_cancelled_job_is_not_retried(self):
+        job = self.job()
+        self.worker._submit_sbatch_job = AsyncMock(return_value="43")
+        self.worker._notify_step_failed = AsyncMock(return_value=True)
+        self.worker._get_job_error_details = AsyncMock(return_value=None)
+        self.assertTrue(await self.worker._handle_job_completion(job, "CANCELLED"))
+        self.worker._submit_sbatch_job.assert_not_awaited()
+        self.worker._notify_step_failed.assert_awaited_once()
+
     async def test_retry_preserves_archived_source(self):
         job = self.job()
         self.worker._submit_sbatch_job = AsyncMock(return_value="43")

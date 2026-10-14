@@ -34,7 +34,7 @@ def calculate_dimensions(filepath, cur_level, rows, cols):
     """预计算维度信息"""
     with h5py.File(filepath, 'r') as f:
         # 获取第一个块的形状来确定维度
-        sample_shape = f['0'][str(cur_level)]['0'][()].shape
+        sample_shape = f['0'][str(cur_level)]['0'].shape
         print(f"Sample shape: {sample_shape}")
         
         # 如果是4D，我们只保留前三个维度
@@ -51,7 +51,7 @@ def calculate_dimensions(filepath, cur_level, rows, cols):
                 row_idx = i // cols
                 col_idx = i % cols
                 
-                shape = f['0'][str(cur_level)][str(i)][()].shape
+                shape = f['0'][str(cur_level)][str(i)].shape
                 if len(shape) == 4:
                     shape = shape[:-1]  # 移除最后一个维度
                 
@@ -143,7 +143,10 @@ def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16, output_file
                 
                 try:
                     # 读取图像数据
-                    img = f['0'][str(cur_level)][str(idx)][()]
+                    dataset = f['0'][str(cur_level)][str(idx)]
+                    if z_start >= dataset.shape[0]:
+                        continue
+                    img = dataset[z_start:min(z_end, dataset.shape[0])]
                     
                     # 确保是numpy数组
                     if not isinstance(img, np.ndarray):
@@ -153,17 +156,8 @@ def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16, output_file
                     if len(img.shape) == 4:
                         img = np.sum(img, axis=3)
                     
-                    # 限制z范围
-                    if z_end <= img.shape[0]:
-                        img_chunk = img[z_start:z_end]
-                    else:
-                        # 如果图像的z维度小于请求的范围，需要处理
-                        actual_z_start = min(z_start, img.shape[0])
-                        actual_z_end = min(z_end, img.shape[0])
-                        if actual_z_start < actual_z_end:
-                            img_chunk = img[actual_z_start:actual_z_end]
-                        else:
-                            continue  # 跳过这个块
+                    # Read only the Z range needed for this output chunk.
+                    img_chunk = img
                     
                     # 计算在全图中的位置
                     y_start = 0
@@ -213,7 +207,7 @@ def get_shape_from_h5file(input_file: str):
     """
     with h5py.File(input_file, 'r') as f:
         try:
-            base_shape = f['0']['0']['0'][()].shape
+            base_shape = f['0']['0']['0'].shape
         except (KeyError, TypeError):
             # 如果无法读取第一个块，尝试其他方法
             print("Warning: Cannot read first block, trying alternative method")
@@ -222,7 +216,7 @@ def get_shape_from_h5file(input_file: str):
                 first_level = levels[0]
                 blocks = list(f['0'][first_level].keys())
                 if blocks:
-                    base_shape = f['0'][first_level][blocks[0]][()].shape
+                    base_shape = f['0'][first_level][blocks[0]].shape
                 else:
                     raise ValueError("No blocks found in H5 file")
             else:
@@ -245,9 +239,9 @@ def get_shape_from_h5file(input_file: str):
                 
                 for row, col in arranges:
                     try:
-                        size0 = f['0'][level]['0'][()].shape[0]
-                        size1 = sum(f['0'][level][str(i)][()].shape[1] for i in range(col))
-                        size2 = sum(f['0'][level][str(i)][()].shape[2]
+                        size0 = f['0'][level]['0'].shape[0]
+                        size1 = sum(f['0'][level][str(i)].shape[1] for i in range(col))
+                        size2 = sum(f['0'][level][str(i)].shape[2]
                                     for i in range(0, size, col))
                         score = abs(np.log(size1/size2)-base_score)
                         if score < min_score:

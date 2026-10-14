@@ -1,4 +1,5 @@
 from v3d_io import load_v3d_raw_img_file, save_v3d_raw_img_file
+from published_output import complete_v3draw, publish_derived_file
 import numpy as np
 import os
 import struct
@@ -418,12 +419,16 @@ def Single_Convert16bitTo8bit(input_file, output_file=None,
         base_name = filename.split('.')[0]
         output_file = os.path.join(directory, f"{base_name}_8bit.v3draw")
 
-    return convert_16bit_to_8bit(
-        input_file,
+    return publish_derived_file(
         output_file,
-        scaling_method=scaling_method,
-        use_chunked=use_chunked,
-        chunk_size_mb=chunk_size_mb
+        lambda temporary: convert_16bit_to_8bit(
+            input_file,
+            temporary,
+            scaling_method=scaling_method,
+            use_chunked=use_chunked,
+            chunk_size_mb=chunk_size_mb,
+        ),
+        complete_v3draw,
     )
 
 

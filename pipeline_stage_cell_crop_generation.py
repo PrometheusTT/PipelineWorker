@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import numpy as np
 from v3dpy.loaders import Raw, PBD
+from published_output import complete_tiff, nonempty_file, publish_derived_file
 
 import os
 import pandas as pd
@@ -174,9 +175,9 @@ def main(h5_path):
         y_end   = min(sy + xy_size + 1, img_y)
         
         if x_start >= x_end or y_start >= y_end:
-            print("Invalid crop region for cell_id:", this_sid, "at x,y =", sx, sy)
-            this_sid += 1
-            continue
+            raise ValueError(
+                f"Invalid crop region for cell_id {this_sid} at x,y={sx},{sy}"
+            )
         
         # 新的 soma 相对于裁剪子图的坐标
         newsx = sx - x_start
@@ -192,38 +193,43 @@ def main(h5_path):
             except PermissionError:
                 print(f'Permission denied: Cannot create directory {outsdir}')
                 print('Please check if you have write permissions to this path')
-                continue
+                raise
             except Exception as e:
                 print(f'Error creating directory {outsdir}: {e}')
-                continue
+                raise
         
         out_file = os.path.join(outsdir, str(this_sid) + '.v3dpbd')
-        if not os.path.exists(out_file):
-            print('Save:', str(this_sid) + '.v3dpbd')
-            # 按 (c, z, y, x) 进行裁剪
+        out_mip_dir = os.path.join(cfg.Cell_MIPsDirectory, fp2dbdirs(this_sid))
+        os.makedirs(out_mip_dir, exist_ok=True)
+        mip_file = os.path.join(out_mip_dir, str(this_sid) + '.tif')
+        if not nonempty_file(out_file) or not complete_tiff(mip_file):
+            # Compute once even if a previous run published only one output.
             cropped_img = img[:, :, y_start:y_end, x_start:x_end]
-            # 保存成 .v3dpbd
-            cell_pbd_saver.save(out_file, np.array(cropped_img))
+            publish_derived_file(
+                out_file,
+                lambda temporary: cell_pbd_saver.save(
+                    temporary, np.array(cropped_img)
+                ),
+                nonempty_file,
+            )
+            from skimage import io
 
-            # 在cfg.Cell_MIPsDirectory下保存 MIP 图像
-            out_mip_dir = os.path.join(cfg.Cell_MIPsDirectory, fp2dbdirs(this_sid))
-            if not os.path.exists(out_mip_dir):
-                os.makedirs(out_mip_dir)
-            mip_file = os.path.join(out_mip_dir, str(this_sid) + '.tif')
-            if not os.path.exists(mip_file):
-                # 计算 MIP 图像 Z 方向的最大投影
-                mip_img = np.max(cropped_img, axis=1)  # 在 Z 轴上进行最大投影
-                # 保存 MIP 图像
-                from skimage import io
-                io.imsave(mip_file, mip_img.astype(np.uint8))
+            publish_derived_file(
+                mip_file,
+                lambda temporary: io.imsave(
+                    temporary,
+                    np.max(cropped_img, axis=1).astype(np.uint8),
+                ),
+                complete_tiff,
+            )
                 
 
         # 递增 cell_id
         this_sid += 1
         
         # 检查保存是否成功
-        if not os.path.exists(out_file):
-            print('Fail to generate ', str(this_sid) + '.v3dpbd')
+        if not nonempty_file(out_file) or not complete_tiff(mip_file):
+            raise RuntimeError(f"Failed to publish crop outputs for cell {this_sid - 1}")
  
 
 if __name__ == '__main__':

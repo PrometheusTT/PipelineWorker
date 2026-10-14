@@ -3,6 +3,7 @@
 import asyncio
 import os
 import subprocess
+import struct
 import tempfile
 import unittest
 from datetime import datetime
@@ -13,6 +14,16 @@ from unittest.mock import AsyncMock, patch
 from fastapi import HTTPException
 
 import pipeline_worker as module
+
+
+def tiny_v3draw():
+    return (
+        struct.pack("<24s", b"raw_image_stack_by_hpeng")
+        + b"L"
+        + struct.pack("<h", 1)
+        + struct.pack("<4I", 2, 1, 1, 1)
+        + b"\x01\x02"
+    )
 
 
 class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
@@ -81,7 +92,7 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_completion_checks_output_in_archived_directory(self):
         output = self.h5.with_name("sample.v3draw")
-        output.write_bytes(b"converted")
+        output.write_bytes(tiny_v3draw())
         self.worker.http_client.post = AsyncMock(
             return_value=SimpleNamespace(status_code=200)
         )
@@ -96,7 +107,7 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.worker.http_client.post.assert_not_awaited()
 
     async def test_completion_callback_failure_retains_job_for_retry(self):
-        self.h5.with_name("sample.v3draw").write_bytes(b"converted")
+        self.h5.with_name("sample.v3draw").write_bytes(tiny_v3draw())
         self.worker.http_client.post = AsyncMock(
             return_value=SimpleNamespace(status_code=503)
         )

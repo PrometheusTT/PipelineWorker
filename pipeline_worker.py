@@ -28,6 +28,7 @@ from fastapi import FastAPI, HTTPException, Header
 from pydantic import BaseModel
 import uvicorn
 import config as cfg
+from published_output import complete_tiff, complete_v3draw
 
 # 配置日志
 logging.basicConfig(
@@ -586,8 +587,11 @@ exec {shlex.quote(cfg.ProcessingPython)} {shlex.quote(script_path)} --image-path
             if final_status == "COMPLETED":
                 expected_output = self._expected_output_path(job_info)
                 if expected_output and (
-                    not os.path.isfile(expected_output)
-                    or os.path.getsize(expected_output) == 0
+                    not (
+                        complete_tiff(expected_output)
+                        if expected_output.endswith(".tif")
+                        else complete_v3draw(expected_output)
+                    )
                 ):
                     return await self._notify_step_failed(
                         job_info.pipeline_id,

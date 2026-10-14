@@ -1,6 +1,7 @@
 import numpy as np
 import h5py
 import os
+from published_output import complete_tiff, publish_derived_file
 from functools import reduce
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -508,12 +509,16 @@ def Single_H5ToMip(input_file, output_file=None,
         base_name = filename.split('.')[0]
         output_file = os.path.join(directory, f"{base_name}_MIP.tif")
 
-    return transfer_h5_to_mip(
-        input_file,
+    return publish_derived_file(
         output_file,
-        use_chunked=use_chunked,
-        chunk_size_z=chunk_size_z,
-        orientation_fix=orientation_fix
+        lambda temporary: transfer_h5_to_mip(
+            input_file,
+            temporary,
+            use_chunked=use_chunked,
+            chunk_size_z=chunk_size_z,
+            orientation_fix=orientation_fix,
+        ),
+        complete_tiff,
     )
 
 

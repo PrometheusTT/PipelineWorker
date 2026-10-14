@@ -7,6 +7,7 @@ import os
 from functools import reduce
 import psutil
 import tqdm
+from published_output import complete_v3draw, publish_derived_file
 
 try:
     from v3d_io import write_v3d_header, append_v3d_chunk
@@ -71,7 +72,7 @@ def calculate_dimensions(filepath, cur_level, rows, cols):
             
         return full_shape, row_heights, col_widths
 
-def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16):
+def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16, output_file=None):
     """
     优化版H5到v3draw转换，使用顺序处理和更小的Z块
     
@@ -91,15 +92,11 @@ def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16):
         spRes = filename.split(".")
         base_filename = spRes[0] if len(spRes) > 0 else filename
 
-    out_file = os.path.join(output_folder, base_filename + ".v3draw")
+    out_file = output_file or os.path.join(output_folder, base_filename + ".v3draw")
     print(f"Output file: {out_file}")
     
     if not os.path.exists(os.path.dirname(out_file)):
         os.makedirs(os.path.dirname(out_file))
-
-    if os.path.exists(out_file):
-        print("V3draw file already existed")
-        return out_file
 
     shapes, arrangements = get_shape_from_h5file(input_file)
     cur_level = str(max([int(key) for key in shapes]))
@@ -190,7 +187,7 @@ def process_h5_to_v3draw(input_file, output_folder, chunk_size_z=16):
                     del img, img_chunk
                     
                 except Exception as e:
-                    print(f"\nError processing block {idx}: {str(e)}")
+                    raise RuntimeError(f"Error processing H5 block {idx}") from e
         
         # 转换为v3d格式: (Z, Y, X) -> (1, Z, Y, X)
         chunk_to_write = np.array([z_chunk_data], dtype=np.uint16)  # (1, Z, Y, X)
@@ -331,7 +328,17 @@ def Single_H5ToV3draw(input_file, output_folder=None, chunk_size_z=50):
     if output_folder is None:
         output_folder = os.path.dirname(input_file)
 
-    return process_h5_to_v3draw(input_file, output_folder, chunk_size_z=chunk_size_z)
+    filename = os.path.basename(input_file)
+    base = filename[:-len(".pyramid.h5")] if filename.endswith(".pyramid.h5") else os.path.splitext(filename)[0]
+    target = os.path.join(output_folder, base + ".v3draw")
+    return publish_derived_file(
+        target,
+        lambda temporary: process_h5_to_v3draw(
+            input_file, output_folder, chunk_size_z=chunk_size_z,
+            output_file=temporary,
+        ),
+        complete_v3draw,
+    )
 
 if __name__ == "__main__":
     # python3 {script_path} --image-path "{image_path}" --output-path "{output_path}"

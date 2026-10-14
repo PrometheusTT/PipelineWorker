@@ -1,4 +1,5 @@
 from v3d_io import load_v3d_raw_img_file, save_v3d_raw_img_file
+from published_output import complete_v3draw, publish_derived_file
 import numpy as np
 import os
 import struct
@@ -556,13 +557,17 @@ def Single_Downsample(input_file, output_file=None,
         base_name = filename.split('.')[0]
         output_file = os.path.join(directory, f"{base_name}_downsampled.v3draw")
 
-    return downsample_v3d_image_efficient(
-        input_file,
+    return publish_derived_file(
         output_file,
-        factors=factors,
-        method=method,
-        use_chunked=use_chunked,
-        chunk_size_z=chunk_size_z
+        lambda temporary: downsample_v3d_image_efficient(
+            input_file,
+            temporary,
+            factors=factors,
+            method=method,
+            use_chunked=use_chunked,
+            chunk_size_z=chunk_size_z,
+        ),
+        complete_v3draw,
     )
 
 if __name__ == "__main__":

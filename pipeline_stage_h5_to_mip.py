@@ -3,7 +3,6 @@ import h5py
 import os
 from published_output import complete_tiff, publish_derived_file
 from functools import reduce
-import matplotlib.pyplot as plt
 from PIL import Image
 from skimage import exposure, filters, morphology
 import gc

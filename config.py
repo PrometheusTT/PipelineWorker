@@ -2,6 +2,7 @@ import os
 
 CoreServerURL = os.environ.get("HNDB_CORE_SERVER_URL", "http://127.0.0.1:8000")
 WorkerToken = os.environ.get("HNDB_PIPELINE_WORKER_TOKEN", "")
+WorkerStatePath = os.environ.get("HNDB_PIPELINE_STATE_FILE", "running_jobs.json")
 
 HNDBRootDirectory = os.environ.get("HNDB_ROOT", "/mnt/nfs/hndb")
 SamplePreparationDirectory = os.environ.get(

@@ -143,6 +143,27 @@ class ArchivedPipelineTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(list(Path(".").glob(".running_jobs-*")), [])
 
+    async def test_running_jobs_state_can_live_outside_checkout(self):
+        state_file = Path(self.temp.name) / "state" / "running_jobs.json"
+        state_file.parent.mkdir()
+        with patch.object(module.cfg, "WorkerStatePath", str(state_file)):
+            worker = module.PipelineWorker(worker_id="test-external-state")
+        try:
+            self.assertEqual(worker.running_jobs_file, str(state_file))
+            self.assertEqual(worker.running_jobs, {})
+            worker.running_jobs["pipeline-1_h5_to_v3draw"] = self.job()
+            worker._save_running_jobs()
+            self.assertTrue(state_file.is_file())
+            self.assertFalse(Path("running_jobs.json").exists())
+            with patch.object(module.cfg, "WorkerStatePath", str(state_file)):
+                recovered = module.PipelineWorker(worker_id="test-recovered-state")
+            try:
+                self.assertIn("pipeline-1_h5_to_v3draw", recovered.running_jobs)
+            finally:
+                await recovered.http_client.aclose()
+        finally:
+            await worker.http_client.aclose()
+
     async def test_slurm_query_timeout_does_not_mark_job_failed(self):
         with patch.object(
             module.subprocess, "run", side_effect=subprocess.TimeoutExpired("squeue", 10)

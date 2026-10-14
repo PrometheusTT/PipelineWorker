@@ -1,3 +1,9 @@
+# 当前单工作站部署注意事项
+
+新版 Worker 应从 `PrometheusTT/PipelineWorker` 检出到独立目录；不要覆盖仍有本地改动的旧目录。运行状态文件不属于代码，应在启动前设置 `HNDB_PIPELINE_STATE_FILE` 为代码目录外的持久路径，并确保其父目录已存在且只由一个 Worker 实例使用。Slurm 脚本和日志也应通过 `HNDB_SLURM_SCRIPT_PATH` 指向新版部署专用目录。不要在未核对后端令牌、生产盘路径及健康检查前开启自动处理。
+
+下文为旧计算集群的历史部署记录，不适用于当前单工作站方案。
+
 # 部署问题描述与解决方案
 由于人脑数据库后端所在服务器与slurm提交任务的服务器不在同一台服务器上，并且两台服务器没有通过同一个物理链路进行连接，所以无法直接访问，尝试在allencenter配置iptables进行多个链路间进行转发失败，由于人脑数据库后端所在服务器已经通过ssh Tunnel将服务转发到跳板机（allencenter server），而slurm任务提交的服务器（slurm master node）与跳板机是通的，所以采用再一次通过ssh Tunnel（ssh -L 8000:192.168.4.47:8000 root@172.16.1.123）后直接在slurm master node使用localhost:8000即可正常连接后端服务
 

@@ -104,7 +104,7 @@ class PipelineWorker:
         self.running_jobs: Dict[str, JobInfo] = {}
         
         # 持久化文件路径
-        self.running_jobs_file = "running_jobs.json"
+        self.running_jobs_file = cfg.WorkerStatePath
 
         # HTTP 客户端
         headers = {"X-HNDB-Worker-Token": cfg.WorkerToken} if cfg.WorkerToken else {}

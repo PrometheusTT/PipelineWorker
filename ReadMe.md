@@ -2,6 +2,8 @@
 
 新版 Worker 应从 `PrometheusTT/PipelineWorker` 检出到独立目录；不要覆盖仍有本地改动的旧目录。运行状态文件不属于代码，应在启动前设置 `HNDB_PIPELINE_STATE_FILE` 为代码目录外的持久路径，并确保其父目录已存在且只由一个 Worker 实例使用。Slurm 脚本和日志也应通过 `HNDB_SLURM_SCRIPT_PATH` 指向新版部署专用目录。不要在未核对后端令牌、生产盘路径及健康检查前开启自动处理。
 
+Crop 步骤优先从 `HNDB_SAMPLE_PREPARATION_ROOT` 读取完整的 CSV/APO 元数据；若该文档的两个文件不齐，才回退到 `HNDB_LEGACY_SAMPLE_PREPARATION_ROOT`（默认 `/mnt/nfs/hndb/SamplePreparation`）。不会移动或覆盖元数据。旧记录重试前仍须逐条核对 8-bit 图像、细胞表和输出空间。
+
 下文为旧计算集群的历史部署记录，不适用于当前单工作站方案。
 
 # 部署问题描述与解决方案

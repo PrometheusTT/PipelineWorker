@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from v3dpy.loaders import Raw, PBD
 from published_output import complete_tiff, nonempty_file, publish_derived_file
+from sample_preparation_paths import resolve_crop_metadata_root
 
 import os
 import pandas as pd
@@ -99,16 +100,12 @@ def main(h5_path):
     raw_loader = Raw()
     cell_pbd_saver = PBD()
  
-    # 胞体信息文件与图像文件根目录
-    soma_dir   = cfg.SamplePreparationDirectory
-    img_dir    = cfg.PTRSB_DBDirectory
+    # 图像文件根目录
+    img_dir = cfg.PTRSB_DBDirectory
     
     # 图像的裁剪结果保存目录
     topbd = cfg.Cell_ImagesDirectory
     
-    # 初始化数据访问类
-    data_accessor = DataAccess(soma_dir, img_dir)
- 
     xy_size = 700  # 裁剪图像边长的一半
 
     h5_image_name = os.path.basename(h5_path)
@@ -130,10 +127,18 @@ def main(h5_path):
             ptrsid = docid[0:-1 * (len(docid_split[4]) + 1)]
     elif len(docid_split) == 6: # P-T-R-S-B-N
         ptrsid = docid[0:-1 * (len(docid_split[5]) + 1)]
+
+    soma_dir = resolve_crop_metadata_root(
+        cfg.SamplePreparationDirectory,
+        cfg.LegacySamplePreparationDirectory,
+        ptrsid,
+        docid,
+    )
+    data_accessor = DataAccess(soma_dir, img_dir)
         
 
     # 读取 CSV 文件获取 Cell ID 范围
-    csv_file_path = os.path.join(cfg.SamplePreparationDirectory, ptrsid, docid, "cell_with_cellID.csv")
+    csv_file_path = os.path.join(soma_dir, ptrsid, docid, "cell_with_cellID.csv")
     if csv_file_path and os.path.exists(csv_file_path):
         df = pd.read_csv(csv_file_path, encoding='UTF-8')
         cell_id_begin = int(df['Cell ID'].min())

@@ -9,6 +9,10 @@ SamplePreparationDirectory = os.environ.get(
     "HNDB_SAMPLE_PREPARATION_ROOT",
     os.path.join(HNDBRootDirectory, "HNDB_files", "SamplePreparation"),
 )
+LegacySamplePreparationDirectory = os.environ.get(
+    "HNDB_LEGACY_SAMPLE_PREPARATION_ROOT",
+    os.path.join(HNDBRootDirectory, "SamplePreparation"),
+)
 Cell_ImagesDirectory = os.environ.get(
     "HNDB_CELL_IMAGE_ROOT", os.path.join(HNDBRootDirectory, "Cell_Image")
 )
